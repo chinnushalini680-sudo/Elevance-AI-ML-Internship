@@ -1,289 +1,519 @@
 import cv2
 import os
+import json
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ==========================================
+# SETTINGS
+# ==========================================
 
-DATASET_DIR = os.path.join(BASE_DIR, "dataset")
-OUTPUT_DIR = os.path.join(BASE_DIR, "face_dataset")
+IMAGE_FOLDER = "dataset/images"
+LABEL_FOLDER = "dataset/labels"
 
-AWAKE_DIR = os.path.join(DATASET_DIR, "awake")
-SLEEP_DIR = os.path.join(DATASET_DIR, "sleep")
+os.makedirs(LABEL_FOLDER, exist_ok=True)
 
-SAVE_AWAKE_DIR = os.path.join(OUTPUT_DIR, "awake")
-SAVE_SLEEP_DIR = os.path.join(OUTPUT_DIR, "sleep")
+CLASS_NAMES = {
+    0: "blue",
+    1: "other",
+    2: "person"
+}
 
-os.makedirs(SAVE_AWAKE_DIR, exist_ok=True)
-os.makedirs(SAVE_SLEEP_DIR, exist_ok=True)
+# ==========================================
+# GLOBAL VARIABLES
+# ==========================================
+
+image = None
+display_image = None
+
+boxes = []
+current_class = None
+
+drawing = False
+start_x = 0
+start_y = 0
 
 
-def annotate_folder(input_dir, output_dir, label):
+# ==========================================
+# DRAW EXISTING BOXES
+# ==========================================
 
-    files = [
-        f for f in os.listdir(input_dir)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ]
+def draw_boxes():
 
-    print()
-    print("================================")
-    print("ANNOTATING:", label.upper())
-    print("================================")
-    print("Images:", len(files))
-    print()
-    print("Drag around each FACE.")
-    print("ENTER = save all boxes")
-    print("U = undo last box")
-    print("R = remove all boxes")
-    print("N = skip image")
-    print("Q = quit")
-    print()
+    global display_image
 
-    total_saved = 0
+    display_image = image.copy()
 
-    for index, filename in enumerate(files):
+    for box in boxes:
 
-        path = os.path.join(input_dir, filename)
+        class_id = box["class_id"]
+        class_name = box["class_name"]
 
-        image = cv2.imread(path)
+        # Blue car = RED rectangle
+        if class_id == 0:
+            color = (0, 0, 255)
 
-        if image is None:
-            continue
+        # Other car = BLUE rectangle
+        elif class_id == 1:
+            color = (255, 0, 0)
 
-        boxes = []
-        drawing = False
-        start_x = 0
-        start_y = 0
+        # Person = GREEN rectangle
+        else:
+            color = (0, 255, 0)
 
-        window_name = "Drowsiness Annotation"
-
-        display = image.copy()
-
-        def mouse(event, x, y, flags, param):
-
-            nonlocal drawing
-            nonlocal start_x
-            nonlocal start_y
-            nonlocal display
-
-            if event == cv2.EVENT_LBUTTONDOWN:
-
-                drawing = True
-                start_x = x
-                start_y = y
-
-            elif event == cv2.EVENT_MOUSEMOVE:
-
-                if drawing:
-
-                    display = image.copy()
-
-                    for box in boxes:
-
-                        x1, y1, x2, y2 = box
-
-                        cv2.rectangle(
-                            display,
-                            (x1, y1),
-                            (x2, y2),
-                            (0, 255, 0),
-                            2
-                        )
-
-                    cv2.rectangle(
-                        display,
-                        (start_x, start_y),
-                        (x, y),
-                        (0, 255, 255),
-                        2
-                    )
-
-            elif event == cv2.EVENT_LBUTTONUP:
-
-                drawing = False
-
-                x1 = min(start_x, x)
-                y1 = min(start_y, y)
-
-                x2 = max(start_x, x)
-                y2 = max(start_y, y)
-
-                if x2 - x1 >= 20 and y2 - y1 >= 20:
-
-                    boxes.append(
-                        (x1, y1, x2, y2)
-                    )
-
-                    print(
-                        "Box added:",
-                        len(boxes)
-                    )
-
-                display = image.copy()
-
-                for box in boxes:
-
-                    x1, y1, x2, y2 = box
-
-                    cv2.rectangle(
-                        display,
-                        (x1, y1),
-                        (x2, y2),
-                        (0, 255, 0),
-                        2
-                    )
-
-        cv2.namedWindow(window_name)
-        cv2.setMouseCallback(window_name, mouse)
-
-        print(
-            f"[{index + 1}/{len(files)}] {filename}"
+        cv2.rectangle(
+            display_image,
+            (box["x1"], box["y1"]),
+            (box["x2"], box["y2"]),
+            color,
+            2
         )
 
-        while True:
+        cv2.putText(
+            display_image,
+            class_name,
+            (
+                box["x1"],
+                max(20, box["y1"] - 5)
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2
+        )
 
-            screen = display.copy()
 
-            cv2.putText(
-                screen,
-                f"Faces: {len(boxes)}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
+# ==========================================
+# MOUSE FUNCTION
+# ==========================================
+
+def mouse_callback(event, x, y, flags, param):
+
+    global drawing
+    global start_x, start_y
+    global display_image
+    global boxes
+    global current_class
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+
+        if current_class is None:
+
+            print()
+            print("Select a class first:")
+            print("1 = Blue car")
+            print("2 = Other car")
+            print("3 = Person")
+            return
+
+        drawing = True
+
+        start_x = x
+        start_y = y
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+
+        if drawing:
+
+            draw_boxes()
+
+            cv2.rectangle(
+                display_image,
+                (start_x, start_y),
+                (x, y),
+                (0, 255, 255),
                 2
             )
 
-            cv2.putText(
-                screen,
-                "ENTER=SAVE  U=UNDO  R=RESET  N=SKIP  Q=QUIT",
-                (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                2
+            cv2.imshow(
+                "Car Colour Annotation",
+                display_image
             )
 
-            cv2.imshow(window_name, screen)
+    elif event == cv2.EVENT_LBUTTONUP:
 
-            key = cv2.waitKey(1) & 0xFF
+        if drawing:
 
-            # ENTER
-            if key == 13:
+            drawing = False
 
-                if len(boxes) == 0:
-                    print("No boxes drawn.")
-                    continue
+            end_x = x
+            end_y = y
 
-                for box in boxes:
+            x1 = min(start_x, end_x)
+            y1 = min(start_y, end_y)
 
-                    x1, y1, x2, y2 = box
+            x2 = max(start_x, end_x)
+            y2 = max(start_y, end_y)
 
-                    face = image[y1:y2, x1:x2]
+            # Ignore tiny boxes
+            if (x2 - x1) > 10 and (y2 - y1) > 10:
 
-                    if face.size == 0:
-                        continue
+                new_box = {
+                    "class_id": current_class,
+                    "class_name": CLASS_NAMES[current_class],
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2
+                }
 
-                    total_saved += 1
+                boxes.append(new_box)
 
-                    save_name = (
-                        f"{label}_{total_saved:04d}.jpg"
-                    )
+                print(
+                    "Added:",
+                    CLASS_NAMES[current_class],
+                    "=>",
+                    (x1, y1),
+                    (x2, y2)
+                )
 
-                    save_path = os.path.join(
-                        output_dir,
-                        save_name
-                    )
+            draw_boxes()
 
-                    cv2.imwrite(
-                        save_path,
-                        face
-                    )
-
-                    print("SAVED:", save_name)
-
-                cv2.destroyWindow(window_name)
-
-                break
-
-            # UNDO
-            elif key == ord("u"):
-
-                if boxes:
-
-                    boxes.pop()
-
-                    display = image.copy()
-
-                    for box in boxes:
-
-                        x1, y1, x2, y2 = box
-
-                        cv2.rectangle(
-                            display,
-                            (x1, y1),
-                            (x2, y2),
-                            (0, 255, 0),
-                            2
-                        )
-
-                    print("Last box removed.")
-
-            # RESET
-            elif key == ord("r"):
-
-                boxes.clear()
-
-                display = image.copy()
-
-                print("All boxes removed.")
-
-            # SKIP
-            elif key == ord("n"):
-
-                print("Skipped:", filename)
-
-                cv2.destroyWindow(window_name)
-
-                break
-
-            # QUIT
-            elif key == ord("q"):
-
-                cv2.destroyAllWindows()
-
-                print("Annotation stopped.")
-
-                return
-
-    cv2.destroyAllWindows()
-
-    print()
-    print("Completed:", label.upper())
-    print("Faces saved:", total_saved)
+            cv2.imshow(
+                "Car Colour Annotation",
+                display_image
+            )
 
 
 # ==========================================
-# AWAKE
+# LOAD EXISTING ANNOTATIONS
 # ==========================================
 
-annotate_folder(
-    AWAKE_DIR,
-    SAVE_AWAKE_DIR,
-    "awake"
-)
+def load_annotations(filename):
+
+    label_filename = os.path.splitext(filename)[0] + ".json"
+
+    label_path = os.path.join(
+        LABEL_FOLDER,
+        label_filename
+    )
+
+    if os.path.exists(label_path):
+
+        try:
+
+            with open(
+                label_path,
+                "r",
+                encoding="utf-8"
+            ) as f:
+
+                data = json.load(f)
+
+            print(
+                "Existing annotations loaded:",
+                len(data.get("annotations", []))
+            )
+
+            return data.get("annotations", [])
+
+        except Exception as e:
+
+            print(
+                "Could not read annotation:",
+                e
+            )
+
+    return []
 
 
 # ==========================================
-# SLEEP
+# SAVE ANNOTATIONS
 # ==========================================
 
-annotate_folder(
-    SLEEP_DIR,
-    SAVE_SLEEP_DIR,
-    "sleep"
-)
+def save_annotations(filename):
 
+    label_filename = os.path.splitext(filename)[0] + ".json"
+
+    label_path = os.path.join(
+        LABEL_FOLDER,
+        label_filename
+    )
+
+    data = {
+        "image": filename,
+        "classes": {
+            "0": "blue",
+            "1": "other",
+            "2": "person"
+        },
+        "annotations": boxes
+    }
+
+    with open(
+        label_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            indent=4
+        )
+
+    print(
+        "Saved:",
+        label_filename
+    )
+
+    print(
+        "Total boxes:",
+        len(boxes)
+    )
+
+
+# ==========================================
+# GET IMAGES
+# ==========================================
+
+image_files = [
+    f
+    for f in os.listdir(IMAGE_FOLDER)
+    if f.lower().endswith(
+        (".jpg", ".jpeg", ".png", ".bmp")
+    )
+]
+
+image_files.sort()
+
+if len(image_files) == 0:
+
+    print(
+        "No images found in:",
+        IMAGE_FOLDER
+    )
+
+    exit()
+
+
+# ==========================================
+# INFORMATION
+# ==========================================
 
 print()
-print("================================")
-print("ANNOTATION COMPLETE")
-print("================================")
+print("==========================================")
+print("       CAR COLOUR ANNOTATION TOOL")
+print("==========================================")
+print()
+print("TOTAL IMAGES:", len(image_files))
+print()
+print("1 = BLUE CAR")
+print("2 = OTHER COLOUR CAR")
+print("3 = PERSON")
+print()
+print("LEFT MOUSE + DRAG = Draw box")
+print()
+print("U = Undo last box")
+print("S = Save")
+print("N = Next image")
+print("Q = Quit")
+print()
+print("Existing annotations will be loaded.")
+print("==========================================")
+
+
+# ==========================================
+# PROCESS IMAGES
+# ==========================================
+
+for image_index, filename in enumerate(image_files):
+
+    image_path = os.path.join(
+        IMAGE_FOLDER,
+        filename
+    )
+
+    image = cv2.imread(image_path)
+
+    if image is None:
+
+        print(
+            "Could not open:",
+            filename
+        )
+
+        continue
+
+    # IMPORTANT:
+    # Load previous annotations
+    boxes = load_annotations(filename)
+
+    current_class = None
+
+    draw_boxes()
+
+    cv2.namedWindow(
+        "Car Colour Annotation"
+    )
+
+    cv2.setMouseCallback(
+        "Car Colour Annotation",
+        mouse_callback
+    )
+
+    print()
+    print("------------------------------------------")
+    print(
+        f"IMAGE {image_index + 1}/{len(image_files)}"
+    )
+    print(
+        "FILE:",
+        filename
+    )
+    print(
+        "Existing boxes:",
+        len(boxes)
+    )
+    print("------------------------------------------")
+
+    while True:
+
+        draw_boxes()
+
+        # Instructions
+        cv2.putText(
+            display_image,
+            "1 Blue | 2 Other | 3 Person",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            display_image,
+            "U Undo | S Save | N Next | Q Quit",
+            (10, 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            2
+        )
+
+        cv2.imshow(
+            "Car Colour Annotation",
+            display_image
+        )
+
+        key = cv2.waitKey(50) & 0xFF
+
+        # ==================================
+        # BLUE CAR
+        # ==================================
+
+        if key == ord("1"):
+
+            current_class = 0
+
+            print(
+                "Selected: BLUE CAR"
+            )
+
+        # ==================================
+        # OTHER CAR
+        # ==================================
+
+        elif key == ord("2"):
+
+            current_class = 1
+
+            print(
+                "Selected: OTHER COLOUR CAR"
+            )
+
+        # ==================================
+        # PERSON
+        # ==================================
+
+        elif key == ord("3"):
+
+            current_class = 2
+
+            print(
+                "Selected: PERSON"
+            )
+
+        # ==================================
+        # UNDO
+        # ==================================
+
+        elif key == ord("u"):
+
+            if len(boxes) > 0:
+
+                removed = boxes.pop()
+
+                print(
+                    "Removed:",
+                    removed["class_name"]
+                )
+
+            else:
+
+                print(
+                    "Nothing to undo."
+                )
+
+        # ==================================
+        # SAVE
+        # ==================================
+
+        elif key == ord("s"):
+
+            save_annotations(filename)
+
+        # ==================================
+        # NEXT IMAGE
+        # ==================================
+
+        elif key == ord("n"):
+
+            save_annotations(filename)
+
+            print(
+                "Moving to next image..."
+            )
+
+            break
+
+        # ==================================
+        # QUIT
+        # ==================================
+
+        elif key == ord("q"):
+
+            save_annotations(filename)
+
+            cv2.destroyAllWindows()
+
+            print()
+            print(
+                "Annotation stopped."
+            )
+
+            print(
+                "Your saved annotations are safe."
+            )
+
+            exit()
+
+
+# ==========================================
+# FINISHED
+# ==========================================
+
+cv2.destroyAllWindows()
+
+print()
+print("==========================================")
+print("       ALL IMAGES COMPLETED")
+print("==========================================")
+print()
+print(
+    "Images:",
+    len(image_files)
+)
+print(
+    "Annotations saved in:",
+    LABEL_FOLDER
+)

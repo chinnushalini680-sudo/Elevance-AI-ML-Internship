@@ -1,220 +1,348 @@
 import os
 import json
+import cv2
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-# ==============================
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.models import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+
+# ============================================================
 # SETTINGS
-# ==============================
+# ============================================================
 
-DATASET_PATH = "dataset"
-MODEL_PATH = "models/sign_language_model.keras"
-LABEL_PATH = "models/labels.json"
+IMAGE_FOLDER = "dataset/images"
+LABEL_FOLDER = "dataset/labels"
 
-IMG_SIZE = 128
-BATCH_SIZE = 16
-EPOCHS = 40
+MODEL_FOLDER = "m"
 
-# ==============================
-# CREATE MODEL FOLDERS
-# ==============================
+IMAGE_SIZE = 224
+BATCH_SIZE = 8
+EPOCHS = 30
 
-os.makedirs("models", exist_ok=True)
+CLASS_NAMES = {
+    0: "blue",
+    1: "other",
+    2: "person"
+}
 
-# ==============================
-# LOAD DATASET
-# ==============================
 
-train_dataset = tf.keras.utils.image_dataset_from_directory(
-    DATASET_PATH,
-    validation_split=0.20,
-    subset="training",
-    seed=42,
-    image_size=(IMG_SIZE, IMG_SIZE),
-    batch_size=BATCH_SIZE,
-    color_mode="rgb"
-)
+# ============================================================
+# CREATE MODEL FOLDER
+# ============================================================
 
-validation_dataset = tf.keras.utils.image_dataset_from_directory(
-    DATASET_PATH,
-    validation_split=0.20,
-    subset="validation",
-    seed=42,
-    image_size=(IMG_SIZE, IMG_SIZE),
-    batch_size=BATCH_SIZE,
-    color_mode="rgb"
-)
+os.makedirs(MODEL_FOLDER, exist_ok=True)
 
-class_names = train_dataset.class_names
 
-print("\nClasses:")
-print(class_names)
+# ============================================================
+# LOAD OBJECT CROPS FROM ANNOTATIONS
+# ============================================================
 
-# Save class names
-with open(LABEL_PATH, "w") as f:
-    json.dump(class_names, f)
-
-# ==============================
-# IMPROVE DATA PERFORMANCE
-# ==============================
-
-AUTOTUNE = tf.data.AUTOTUNE
-
-train_dataset = train_dataset.prefetch(AUTOTUNE)
-validation_dataset = validation_dataset.prefetch(AUTOTUNE)
-
-# ==============================
-# DATA AUGMENTATION
-# ==============================
-
-data_augmentation = tf.keras.Sequential([
-    layers.RandomFlip("horizontal"),
-    layers.RandomRotation(0.08),
-    layers.RandomZoom(0.10),
-    layers.RandomTranslation(0.08, 0.08)
-])
-
-# ==============================
-# CLASS WEIGHTS
-# ==============================
-
-class_counts = {}
-
-for class_index, class_name in enumerate(class_names):
-    folder = os.path.join(DATASET_PATH, class_name)
-
-    count = len([
-        f for f in os.listdir(folder)
-        if f.lower().endswith((".jpg", ".jpeg", ".png"))
-    ])
-
-    class_counts[class_index] = count
-
-print("\nImage counts:")
-for index, count in class_counts.items():
-    print(class_names[index], ":", count)
-
+X = []
 y = []
 
-for class_index, count in class_counts.items():
-    y.extend([class_index] * count)
+print()
+print("==========================================")
+print("LOADING ANNOTATED OBJECTS")
+print("==========================================")
 
-class_weights_array = compute_class_weight(
+image_files = [
+    f for f in os.listdir(IMAGE_FOLDER)
+    if f.lower().endswith((".jpg", ".jpeg", ".png"))
+]
+
+for image_name in image_files:
+
+    image_path = os.path.join(IMAGE_FOLDER, image_name)
+
+    label_name = os.path.splitext(image_name)[0] + ".json"
+    label_path = os.path.join(LABEL_FOLDER, label_name)
+
+    if not os.path.exists(label_path):
+        continue
+
+    image = cv2.imread(image_path)
+
+    if image is None:
+        continue
+
+    with open(label_path, "r") as file:
+        data = json.load(file)
+
+    for annotation in data.get("annotations", []):
+
+        class_id = int(annotation["class_id"])
+
+        if class_id not in CLASS_NAMES:
+            continue
+
+        x1 = int(annotation["x1"])
+        y1 = int(annotation["y1"])
+        x2 = int(annotation["x2"])
+        y2 = int(annotation["y2"])
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(image.shape[1], x2)
+        y2 = min(image.shape[0], y2)
+
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        crop = image[y1:y2, x1:x2]
+
+        if crop.size == 0:
+            continue
+
+        crop = cv2.resize(
+            crop,
+            (IMAGE_SIZE, IMAGE_SIZE)
+        )
+
+        crop = cv2.cvtColor(
+            crop,
+            cv2.COLOR_BGR2RGB
+        )
+
+        X.append(crop)
+        y.append(class_id)
+
+
+X = np.array(X, dtype=np.float32)
+y = np.array(y, dtype=np.int32)
+
+
+print()
+print("Total object crops:", len(X))
+
+for class_id, class_name in CLASS_NAMES.items():
+    count = np.sum(y == class_id)
+    print(f"{class_name.capitalize()}: {count}")
+
+
+# ============================================================
+# PREPROCESS
+# ============================================================
+
+X = preprocess_input(X)
+
+
+# ============================================================
+# TRAIN / VALIDATION SPLIT
+# ============================================================
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X,
+    y,
+    test_size=0.20,
+    random_state=42,
+    stratify=y
+)
+
+print()
+print("Training objects:", len(X_train))
+print("Validation objects:", len(X_val))
+
+
+# ============================================================
+# CLASS WEIGHTS
+# ============================================================
+
+classes = np.unique(y_train)
+
+weights = compute_class_weight(
     class_weight="balanced",
-    classes=np.unique(y),
-    y=np.array(y)
+    classes=classes,
+    y=y_train
 )
 
 class_weights = {
-    i: float(class_weights_array[i])
-    for i in range(len(class_names))
+    int(class_id): float(weight)
+    for class_id, weight in zip(classes, weights)
 }
 
-print("\nClass weights:")
-print(class_weights)
+print()
+print("==========================================")
+print("CLASS WEIGHTS")
+print("==========================================")
 
-# ==============================
-# CNN MODEL
-# ==============================
+for class_id in sorted(class_weights):
+    print(
+        f"{CLASS_NAMES[class_id].capitalize()}: "
+        f"{class_weights[class_id]:.2f}"
+    )
 
-model = models.Sequential([
 
-    layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
+# ============================================================
+# DATA AUGMENTATION
+# ============================================================
 
-    data_augmentation,
+datagen = ImageDataGenerator(
+    rotation_range=10,
+    width_shift_range=0.10,
+    height_shift_range=0.10,
+    zoom_range=0.15,
+    horizontal_flip=True
+)
 
-    layers.Rescaling(1.0 / 255),
+datagen.fit(X_train)
 
-    layers.Conv2D(32, (3, 3), activation="relu"),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D(),
 
-    layers.Conv2D(64, (3, 3), activation="relu"),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D(),
+# ============================================================
+# MOBILE NET V2
+# ============================================================
 
-    layers.Conv2D(128, (3, 3), activation="relu"),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D(),
+print()
+print("Loading MobileNetV2...")
 
-    layers.Conv2D(256, (3, 3), activation="relu"),
-    layers.BatchNormalization(),
-    layers.MaxPooling2D(),
+base_model = MobileNetV2(
+    weights="imagenet",
+    include_top=False,
+    input_shape=(IMAGE_SIZE, IMAGE_SIZE, 3)
+)
 
-    layers.GlobalAveragePooling2D(),
+# Freeze base model
+base_model.trainable = False
 
-    layers.Dense(128, activation="relu"),
-    layers.Dropout(0.4),
 
-    layers.Dense(len(class_names), activation="softmax")
-])
+# ============================================================
+# CLASSIFICATION HEAD
+# ============================================================
 
-# ==============================
+x = base_model.output
+
+x = GlobalAveragePooling2D()(x)
+
+x = Dense(
+    128,
+    activation="relu"
+)(x)
+
+x = Dropout(0.4)(x)
+
+output = Dense(
+    3,
+    activation="softmax"
+)(x)
+
+model = Model(
+    inputs=base_model.input,
+    outputs=output
+)
+
+
+# ============================================================
 # COMPILE
-# ==============================
+# ============================================================
 
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    optimizer=tf.keras.optimizers.Adam(
+        learning_rate=0.0001
+    ),
     loss="sparse_categorical_crossentropy",
     metrics=["accuracy"]
 )
 
-model.summary()
 
-# ==============================
+# ============================================================
 # CALLBACKS
-# ==============================
+# ============================================================
 
-early_stopping = EarlyStopping(
-    monitor="val_accuracy",
-    patience=7,
-    restore_best_weights=True
+best_model_path = os.path.join(
+    MODEL_FOLDER,
+    "car_colour_model_improved.keras"
 )
 
-checkpoint = ModelCheckpoint(
-    MODEL_PATH,
-    monitor="val_accuracy",
-    save_best_only=True,
-    verbose=1
-)
+callbacks = [
 
-# ==============================
+    ModelCheckpoint(
+        best_model_path,
+        monitor="val_accuracy",
+        save_best_only=True,
+        mode="max",
+        verbose=1
+    ),
+
+    EarlyStopping(
+        monitor="val_accuracy",
+        patience=7,
+        mode="max",
+        restore_best_weights=True,
+        verbose=1
+    )
+]
+
+
+# ============================================================
 # TRAIN
-# ==============================
+# ============================================================
 
-print("\n==============================")
-print("STARTING SIGN LANGUAGE TRAINING")
-print("==============================\n")
+print()
+print("==========================================")
+print("STARTING TRAINING")
+print("==========================================")
 
 history = model.fit(
-    train_dataset,
-    validation_data=validation_dataset,
+    datagen.flow(
+        X_train,
+        y_train,
+        batch_size=BATCH_SIZE
+    ),
+    validation_data=(X_val, y_val),
     epochs=EPOCHS,
     class_weight=class_weights,
-    callbacks=[
-        early_stopping,
-        checkpoint
-    ]
+    callbacks=callbacks
 )
 
-# ==============================
-# FINAL RESULTS
-# ==============================
 
-loss, accuracy = model.evaluate(validation_dataset)
+# ============================================================
+# VALIDATION
+# ============================================================
 
-print("\n==============================")
-print("TRAINING COMPLETED")
-print("==============================")
+loss, accuracy = model.evaluate(
+    X_val,
+    y_val,
+    verbose=0
+)
 
-print("Validation Accuracy:", round(accuracy * 100, 2), "%")
-print("Validation Loss:", round(loss, 4))
+print()
+print("==========================================")
+print("TRAINING COMPLETE")
+print("==========================================")
 
-print("\nModel saved to:")
-print(MODEL_PATH)
+print(
+    f"Validation Accuracy: {accuracy * 100:.2f}%"
+)
 
-print("\nLabels saved to:")
-print(LABEL_PATH)
+print()
+print("Best model saved at:")
+print(best_model_path)
+
+
+# ============================================================
+# SAVE FINAL MODEL
+# ============================================================
+
+final_model_path = os.path.join(
+    MODEL_FOLDER,
+    "car_colour_model_improved_final.keras"
+)
+
+model.save(final_model_path)
+
+print()
+print("Final model saved at:")
+print(final_model_path)
+
+print()
+print("==========================================")
+print("DONE")
+print("==========================================")
