@@ -1,110 +1,145 @@
-import os
 import cv2
+import json
 import numpy as np
 import tensorflow as tf
+from datetime import datetime
 
-# ==========================================
-# PATHS
-# ==========================================
+# ==============================
+# SETTINGS
+# ==============================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = "models/sign_language_model.keras"
+LABEL_PATH = "models/labels.json"
 
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "models",
-    "drowsiness_model.keras"
-)
+IMG_SIZE = 128
 
-# ==========================================
+# ==============================
+# CHECK TIME
+# ==============================
+
+current_hour = datetime.now().hour
+
+if current_hour < 18 or current_hour >= 22:
+    print("====================================")
+    print("SIGN LANGUAGE DETECTION")
+    print("====================================")
+    print("The system works only from 6 PM to 10 PM.")
+    print("Current time is outside the allowed time.")
+    print("====================================")
+    exit()
+
+# ==============================
 # LOAD MODEL
-# ==========================================
+# ==============================
+
+print("Loading model...")
 
 model = tf.keras.models.load_model(MODEL_PATH)
 
-print("Model loaded successfully.")
+with open(LABEL_PATH, "r") as f:
+    class_names = json.load(f)
 
-# ==========================================
-# TEST IMAGE
-# ==========================================
+print("Classes:", class_names)
 
-image_path = input(
-    "Enter image path: "
-).strip().strip('"')
+# ==============================
+# OPEN CAMERA
+# ==============================
 
-if not os.path.exists(image_path):
+camera = cv2.VideoCapture(0)
 
-    print("Image not found:")
-    print(image_path)
+if not camera.isOpened():
+    print("ERROR: Camera could not be opened.")
     exit()
 
-# ==========================================
-# READ IMAGE
-# ==========================================
+print("\nCamera started.")
+print("Show one sign to the camera.")
+print("Press Q to quit.")
 
-image = cv2.imread(image_path)
+# ==============================
+# REAL-TIME PREDICTION
+# ==============================
 
-if image is None:
+while True:
 
-    print("Could not read image.")
-    exit()
+    ret, frame = camera.read()
 
-# ==========================================
-# PREPROCESS
-# ==========================================
+    if not ret:
+        print("ERROR: Could not read camera.")
+        break
 
-image = cv2.resize(
-    image,
-    (96, 96)
-)
+    frame = cv2.flip(frame, 1)
 
-# Convert to grayscale
-image = cv2.cvtColor(
-    image,
-    cv2.COLOR_BGR2GRAY
-)
+    # Resize image for model
+    image = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
 
-# Normalize
-image = image.astype("float32") / 255.0
+    # Convert BGR to RGB
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-# Add dimensions
-image = np.expand_dims(
-    image,
-    axis=0
-)
+    # Normalize
+    image = image.astype("float32") / 255.0
 
-image = np.expand_dims(
-    image,
-    axis=-1
-)
+    # Add batch dimension
+    image = np.expand_dims(image, axis=0)
 
-# ==========================================
-# PREDICTION
-# ==========================================
+    # Prediction
+    predictions = model.predict(image, verbose=0)
 
-prediction = model.predict(
-    image,
-    verbose=0
-)[0][0]
+    predicted_index = np.argmax(predictions[0])
 
-print()
-print("Prediction value:", prediction)
+    confidence = predictions[0][predicted_index] * 100
 
-# ==========================================
-# RESULT
-# ==========================================
+    predicted_sign = class_names[predicted_index]
 
-if prediction >= 0.5:
+    # ==============================
+    # DISPLAY
+    # ==============================
 
-    result = "SLEEPING"
-    confidence = prediction * 100
+    text = f"{predicted_sign.upper()}  {confidence:.1f}%"
 
-else:
+    cv2.rectangle(
+        frame,
+        (10, 10),
+        (500, 70),
+        (0, 0, 0),
+        -1
+    )
 
-    result = "AWAKE"
-    confidence = (1 - prediction) * 100
+    cv2.putText(
+        frame,
+        text,
+        (25, 52),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (0, 255, 0),
+        2
+    )
 
-print()
-print("RESULT:", result)
-print(
-    f"Confidence: {confidence:.2f}%"
-)
+    cv2.putText(
+        frame,
+        "Press Q to quit",
+        (20, frame.shape[0] - 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 0, 255),
+        2
+    )
+
+    cv2.imshow("Sign Language Detection", frame)
+
+    # ==============================
+    # QUIT
+    # ==============================
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
+        break
+
+# ==============================
+# CLOSE
+# ==============================
+
+camera.release()
+cv2.destroyAllWindows()
+
+print("Test completed.")

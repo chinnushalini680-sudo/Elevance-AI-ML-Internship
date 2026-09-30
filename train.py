@@ -1,302 +1,220 @@
 import os
+import json
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from sklearn.utils.class_weight import compute_class_weight
 
-# ==========================================
-# PATHS
-# ==========================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-DATASET_DIR = os.path.join(BASE_DIR, "face_dataset")
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-# ==========================================
+# ==============================
 # SETTINGS
-# ==========================================
+# ==============================
 
-IMG_SIZE = 96
-BATCH_SIZE = 8
-EPOCHS = 60
+DATASET_PATH = "dataset"
+MODEL_PATH = "models/sign_language_model.keras"
+LABEL_PATH = "models/labels.json"
 
-# ==========================================
-# COUNTS
-# ==========================================
+IMG_SIZE = 128
+BATCH_SIZE = 16
+EPOCHS = 40
 
-awake_dir = os.path.join(DATASET_DIR, "awake")
-sleep_dir = os.path.join(DATASET_DIR, "sleep")
+# ==============================
+# CREATE MODEL FOLDERS
+# ==============================
 
-awake_count = len([
-    f for f in os.listdir(awake_dir)
-    if f.lower().endswith((".jpg", ".jpeg", ".png"))
-])
+os.makedirs("models", exist_ok=True)
 
-sleep_count = len([
-    f for f in os.listdir(sleep_dir)
-    if f.lower().endswith((".jpg", ".jpeg", ".png"))
-])
+# ==============================
+# LOAD DATASET
+# ==============================
 
-print()
-print("================================")
-print("DROWSINESS CNN FROM SCRATCH")
-print("================================")
-print()
-
-print("Awake:", awake_count)
-print("Sleep:", sleep_count)
-print("Total:", awake_count + sleep_count)
-
-# ==========================================
-# DATA GENERATOR
-# ==========================================
-
-datagen = ImageDataGenerator(
-    rescale=1.0 / 255.0,
+train_dataset = tf.keras.utils.image_dataset_from_directory(
+    DATASET_PATH,
     validation_split=0.20,
-
-    rotation_range=8,
-    width_shift_range=0.08,
-    height_shift_range=0.08,
-    zoom_range=0.10,
-    brightness_range=(0.85, 1.15)
-)
-
-# ==========================================
-# TRAIN DATA
-# ==========================================
-
-train_data = datagen.flow_from_directory(
-    DATASET_DIR,
-
-    target_size=(IMG_SIZE, IMG_SIZE),
-
-    color_mode="grayscale",
-
-    batch_size=BATCH_SIZE,
-
-    class_mode="binary",
-
-    classes=["awake", "sleep"],
-
     subset="training",
-
-    shuffle=True,
-
-    seed=42
-)
-
-# ==========================================
-# VALIDATION DATA
-# ==========================================
-
-validation_data = datagen.flow_from_directory(
-    DATASET_DIR,
-
-    target_size=(IMG_SIZE, IMG_SIZE),
-
-    color_mode="grayscale",
-
+    seed=42,
+    image_size=(IMG_SIZE, IMG_SIZE),
     batch_size=BATCH_SIZE,
-
-    class_mode="binary",
-
-    classes=["awake", "sleep"],
-
-    subset="validation",
-
-    shuffle=False,
-
-    seed=42
+    color_mode="rgb"
 )
 
-print()
-print("Class mapping:")
-print(train_data.class_indices)
-print()
+validation_dataset = tf.keras.utils.image_dataset_from_directory(
+    DATASET_PATH,
+    validation_split=0.20,
+    subset="validation",
+    seed=42,
+    image_size=(IMG_SIZE, IMG_SIZE),
+    batch_size=BATCH_SIZE,
+    color_mode="rgb"
+)
 
-# ==========================================
-# CNN FROM SCRATCH
-# ==========================================
+class_names = train_dataset.class_names
+
+print("\nClasses:")
+print(class_names)
+
+# Save class names
+with open(LABEL_PATH, "w") as f:
+    json.dump(class_names, f)
+
+# ==============================
+# IMPROVE DATA PERFORMANCE
+# ==============================
+
+AUTOTUNE = tf.data.AUTOTUNE
+
+train_dataset = train_dataset.prefetch(AUTOTUNE)
+validation_dataset = validation_dataset.prefetch(AUTOTUNE)
+
+# ==============================
+# DATA AUGMENTATION
+# ==============================
+
+data_augmentation = tf.keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.08),
+    layers.RandomZoom(0.10),
+    layers.RandomTranslation(0.08, 0.08)
+])
+
+# ==============================
+# CLASS WEIGHTS
+# ==============================
+
+class_counts = {}
+
+for class_index, class_name in enumerate(class_names):
+    folder = os.path.join(DATASET_PATH, class_name)
+
+    count = len([
+        f for f in os.listdir(folder)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ])
+
+    class_counts[class_index] = count
+
+print("\nImage counts:")
+for index, count in class_counts.items():
+    print(class_names[index], ":", count)
+
+y = []
+
+for class_index, count in class_counts.items():
+    y.extend([class_index] * count)
+
+class_weights_array = compute_class_weight(
+    class_weight="balanced",
+    classes=np.unique(y),
+    y=np.array(y)
+)
+
+class_weights = {
+    i: float(class_weights_array[i])
+    for i in range(len(class_names))
+}
+
+print("\nClass weights:")
+print(class_weights)
+
+# ==============================
+# CNN MODEL
+# ==============================
 
 model = models.Sequential([
 
-    layers.Input(
-        shape=(IMG_SIZE, IMG_SIZE, 1)
-    ),
+    layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
 
-    # BLOCK 1
+    data_augmentation,
 
-    layers.Conv2D(
-        32,
-        (3, 3),
-        activation="relu",
-        padding="same"
-    ),
+    layers.Rescaling(1.0 / 255),
 
+    layers.Conv2D(32, (3, 3), activation="relu"),
     layers.BatchNormalization(),
+    layers.MaxPooling2D(),
 
-    layers.MaxPooling2D(
-        (2, 2)
-    ),
-
-    layers.Dropout(0.20),
-
-    # BLOCK 2
-
-    layers.Conv2D(
-        64,
-        (3, 3),
-        activation="relu",
-        padding="same"
-    ),
-
+    layers.Conv2D(64, (3, 3), activation="relu"),
     layers.BatchNormalization(),
+    layers.MaxPooling2D(),
 
-    layers.MaxPooling2D(
-        (2, 2)
-    ),
-
-    layers.Dropout(0.25),
-
-    # BLOCK 3
-
-    layers.Conv2D(
-        128,
-        (3, 3),
-        activation="relu",
-        padding="same"
-    ),
-
+    layers.Conv2D(128, (3, 3), activation="relu"),
     layers.BatchNormalization(),
+    layers.MaxPooling2D(),
 
-    layers.MaxPooling2D(
-        (2, 2)
-    ),
-
-    layers.Dropout(0.30),
-
-    # CLASSIFIER
+    layers.Conv2D(256, (3, 3), activation="relu"),
+    layers.BatchNormalization(),
+    layers.MaxPooling2D(),
 
     layers.GlobalAveragePooling2D(),
 
-    layers.Dense(
-        64,
-        activation="relu"
-    ),
+    layers.Dense(128, activation="relu"),
+    layers.Dropout(0.4),
 
-    layers.Dropout(0.40),
-
-    layers.Dense(
-        1,
-        activation="sigmoid"
-    )
+    layers.Dense(len(class_names), activation="softmax")
 ])
 
-# ==========================================
+# ==============================
 # COMPILE
-# ==========================================
+# ==============================
 
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(
-        learning_rate=0.0005
-    ),
-
-    loss="binary_crossentropy",
-
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.0005),
+    loss="sparse_categorical_crossentropy",
     metrics=["accuracy"]
 )
 
-print("Model created from scratch.")
-print()
+model.summary()
 
-# ==========================================
+# ==============================
 # CALLBACKS
-# ==========================================
+# ==============================
 
-model_path = os.path.join(
-    MODEL_DIR,
-    "drowsiness_model.keras"
+early_stopping = EarlyStopping(
+    monitor="val_accuracy",
+    patience=7,
+    restore_best_weights=True
 )
 
 checkpoint = ModelCheckpoint(
-    model_path,
+    MODEL_PATH,
     monitor="val_accuracy",
     save_best_only=True,
-    mode="max",
     verbose=1
 )
 
-early_stop = EarlyStopping(
-    monitor="val_loss",
-    patience=10,
-    restore_best_weights=True,
-    verbose=1
-)
-
-reduce_lr = ReduceLROnPlateau(
-    monitor="val_loss",
-    factor=0.5,
-    patience=4,
-    min_lr=0.000001,
-    verbose=1
-)
-
-# ==========================================
+# ==============================
 # TRAIN
-# ==========================================
+# ==============================
 
-print("================================")
-print("STARTING TRAINING")
-print("================================")
-print()
+print("\n==============================")
+print("STARTING SIGN LANGUAGE TRAINING")
+print("==============================\n")
 
 history = model.fit(
-    train_data,
-
-    validation_data=validation_data,
-
+    train_dataset,
+    validation_data=validation_dataset,
     epochs=EPOCHS,
-
+    class_weight=class_weights,
     callbacks=[
-        checkpoint,
-        early_stop,
-        reduce_lr
+        early_stopping,
+        checkpoint
     ]
 )
 
-# ==========================================
-# RESULTS
-# ==========================================
+# ==============================
+# FINAL RESULTS
+# ==============================
 
-best_train = max(
-    history.history["accuracy"]
-)
+loss, accuracy = model.evaluate(validation_dataset)
 
-best_val = max(
-    history.history["val_accuracy"]
-)
+print("\n==============================")
+print("TRAINING COMPLETED")
+print("==============================")
 
-print()
-print("================================")
-print("TRAINING COMPLETE")
-print("================================")
-print()
+print("Validation Accuracy:", round(accuracy * 100, 2), "%")
+print("Validation Loss:", round(loss, 4))
 
-print(
-    f"Best training accuracy: "
-    f"{best_train * 100:.2f}%"
-)
+print("\nModel saved to:")
+print(MODEL_PATH)
 
-print(
-    f"Best validation accuracy: "
-    f"{best_val * 100:.2f}%"
-)
-
-print()
-
-print("Model saved at:")
-print(model_path)
+print("\nLabels saved to:")
+print(LABEL_PATH)
